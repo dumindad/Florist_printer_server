@@ -1,122 +1,154 @@
-const WebSocket = require("ws");
-const escpos = require("escpos");
-const sharp = require('sharp');
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
-escpos.USB = require("escpos-usb");
+const os = require("os");
 
 // ── Version metadata (read from version.json) ──
 let APP_VERSION = "1.0.0";
 let BUILD_DATE = "unknown";
+let APP_NAME = "POS Printer Server";
 try {
   const versionPath = path.join(__dirname, "version.json");
   if (fs.existsSync(versionPath)) {
     const v = JSON.parse(fs.readFileSync(versionPath, "utf8"));
     APP_VERSION = v.version || APP_VERSION;
     BUILD_DATE = v.buildDate || BUILD_DATE;
+    APP_NAME = v.name || APP_NAME;
   }
-} catch (e) {
-  // ignore
+} catch (e) { /* ignore */ }
+
+// ── Helper: resolve asset paths (works in dev + pkg) ──
+function getAssetPath(filePath) {
+  if (process.pkg) {
+    return path.join(path.dirname(process.execPath), filePath);
+  }
+  return path.join(__dirname, filePath);
 }
 
-// ── HTTP server for health/version checks ──
-const httpServer = http.createServer((req, res) => {
-  // CORS (allow admin panel from any origin)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+// ── When running inside a packaged executable ──
+if (process.pkg) {
+  const basePath = path.dirname(process.execPath);
+  const nodeModulesPath = path.join(basePath, "node_modules");
+  process.env.NODE_PATH = nodeModulesPath;
+  require("module").Module._initPaths();
+  process.env.SHARP_PATH = path.join(nodeModulesPath, "sharp");
+}
 
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
+// ── Load modules (pkg-aware) ──
+const WebSocket = require("ws");
+const escpos = require("escpos");
 
-  if (req.url === "/version" || req.url === "/api/version") {
-    const data = JSON.stringify({
-      version: APP_VERSION,
-      buildDate: BUILD_DATE,
-      name: "POS Printer Server",
-      platform: process.platform,
-      arch: process.arch,
-      nodeVersion: process.version,
-      uptime: process.uptime(),
-    });
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(data);
-    return;
-  }
+const sharp = process.pkg
+  ? require(path.join(process.env.NODE_PATH, "sharp"))
+  : require("sharp");
 
-  if (req.url === "/health" || req.url === "/api/health") {
-    const data = JSON.stringify({
-      status: "ok",
-      uptime: process.uptime(),
-    });
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(data);
-    return;
-  }
+const usb = process.pkg
+  ? require(path.join(process.env.NODE_PATH, "usb"))
+  : require("usb");
 
-  res.writeHead(200);
-  res.end("POS Printer Server — WebSocket on ws://localhost:8080");
-});
+escpos.USB = process.pkg
+  ? require(path.join(process.env.NODE_PATH, "escpos-usb"))
+  : require("escpos-usb");
 
-httpServer.listen(8081, "127.0.0.1", () => {
-  console.log("📡 HTTP health server on http://127.0.0.1:8081");
-});
+// ── SSL certs ──
+const certPath = getAssetPath("certs/localhost+2.pem");
+const keyPath = getAssetPath("certs/localhost+2-key.pem");
 
-// ── WebSocket server for print jobs ──
-const wss = new WebSocket.Server({ port: 8080 });
+if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+  console.error("❌ SSL cert files not found at:", certPath);
+  console.error("   Generate them with: openssl req -x509 -newkey rsa:2048 -keyout localhost+2-key.pem -out localhost+2.pem -days 3650 -nodes -subj '/CN=localhost'");
+  process.exit(1);
+}
 
-let printQueue = []; // Queue to store failed print jobs
-let labelPrintQueue = []; // Queue for label printer
-let isPrinting = false; // Flag to prevent simultaneous print jobs
+// ── HTTPS server (health/version + WebSocket) ──
+const server = https.createServer(
+  {
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath),
+  },
+  (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.url === "/version" || req.url === "/api/version") {
+      const data = JSON.stringify({
+        version: APP_VERSION,
+        buildDate: BUILD_DATE,
+        name: APP_NAME,
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        uptime: process.uptime(),
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(data);
+      return;
+    }
+
+    if (req.url === "/health" || req.url === "/api/health") {
+      const data = JSON.stringify({
+        status: "ok",
+        uptime: process.uptime(),
+        wsClients: wss ? wss.clients.size : 0,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(data);
+      return;
+    }
+
+    res.writeHead(200);
+    res.end("POS Printer Server — WSS on wss://localhost:8080");
+  },
+);
+
+// ── WebSocket on top of HTTPS (WSS) ──
+const wss = new WebSocket.Server({ server });
+
+let printQueue = [];
+let labelPrintQueue = [];
+let isPrinting = false;
 let isLabelPrinting = false;
 
 wss.on("connection", (ws) => {
-    console.log("Client connected");
-    console.log("printQueue", printQueue);
-    console.log("labelPrintQueue", labelPrintQueue);
+  console.log("Client connected");
+  console.log("printQueue", printQueue);
+  console.log("labelPrintQueue", labelPrintQueue);
 
-    ws.on("message", async (message) => {
-        try {
-            const data = JSON.parse(message);
-            console.log("Received message:", data);
+  ws.on("message", async (message) => {
+    try {
+      const data = JSON.parse(message);
+      console.log("Received message:", data);
 
-            if (data.type === "PRINT") {
-                queuePrintJob(data, ws);
-            } else if (data.type === "PRINT_PACKAGE_PRODUCTS") {
-                // console.log("Received message idVendor:", idVendorFormatted);
-                // printPackageLabel(data)
-                queuePrintJobToMakeB(data, ws)
-            } else if (data.type === "PRINT_LABEL_CODE") {
+      if (data.type === "PRINT") {
+        queuePrintJob(data, ws);
+      } else if (data.type === "PRINT_PACKAGE_PRODUCTS") {
+        queuePrintJobToMakeB(data, ws);
+      } else if (data.type === "PRINT_LABEL_CODE") {
+        printLabel(data, ws);
+      }
+    } catch (err) {
+      console.error("Error:", err);
+      ws.send(JSON.stringify({ success: false, error: err.message }));
+    }
+  });
 
-                // print Package Label (bar code or QR code)
-                // queuePrintJobToLabel(data, ws)
-                // processBarCodePrint(data, ws)
-                // debugUSBDevice(data)
-                const LABEL = "LABEL";
-                // debugUsbConnection();
-                // setPrinterMode(LABEL)
-                printLabel(data, ws)
-
-
-                // initializePrinter().then(() => {
-                //     // Proceed with printing
-                //     // checkPrinterMode(data, ws)
-                // }).catch(error => console.error('Fatal error:', error));
-            }
-        } catch (err) {
-            console.error("Error:", err);
-            ws.send(JSON.stringify({ success: false, error: err.message }));
-        }
-    });
-
-    ws.on("close", () => console.log("Client disconnected"));
+  ws.on("close", () => console.log("Client disconnected"));
 });
 
-console.log("WebSocket server listening on ws://localhost:8080");
+// Start server on port 8080
+server.listen(8080, "0.0.0.0", () => {
+  console.log(`🚀 WSS server running on wss://localhost:8080`);
+  console.log(`📡 Version: ${APP_VERSION}`);
+  console.log(`📡 Build: ${BUILD_DATE}`);
+});
 
 // Function to queue the print job
 function queuePrintJob(printJob, ws) {
@@ -246,8 +278,8 @@ async function printReceipt(data, ws) {
             const printer = new escpos.Printer(device);
             const { invoiceNo, create, items, paymentMethod } = data;
             // Add before device.open:
-            const logoPath = `${__dirname}/images/logo.png`;
-            const processedLogo = `${__dirname}/images/logo_processed.png`;
+            const logoPath = getAssetPath("images/logo.png");
+            const processedLogo = getAssetPath("images/logo_processed.png");
             // Pre-process image first
             await sharp(logoPath)
                 .resize(384, 384)
@@ -524,7 +556,8 @@ async function printLabel(printData, ws) {
     console.log("price withoutFirstWord", withoutFirstWord)
     if (!printer) {
         console.error("Printer not found");
-        process.exit(1);
+        if (ws) ws.send(JSON.stringify({ success: false, error: "Printer not found" }));
+        return;
     }
     // Label dimensions
     const labelWidthMM = 30;

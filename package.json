@@ -1,30 +1,42 @@
 {
   "name": "printer_server",
   "version": "1.0.0",
-  "description": "",
+  "description": "POS Printer Server — WebSocket + HTTPS server for thermal/USB label and receipt printing",
   "main": "print.js",
-  "bin": "print.js",
   "scripts": {
     "start": "node print.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "echo 'WARNING: pkg cannot bundle native modules (sharp, usb). Use start.bat to run with node directly.' && exit 1",
-    "build:legacy": "pkg print.js --targets node18-win-x64 --output dist/printer-server.exe",
-    "dist": "node scripts/dist.js"
+    "build": "npx @yao-pkg/pkg print.js --targets node20-win-x64 --output dist/printer-server.exe",
+    "package": "powershell -ExecutionPolicy Bypass -File build-installer.ps1",
+    "release": "pnpm build && pnpm package",
+    "gen-certs": "node scripts/gen-certs.js"
+  },
+  "pkg": {
+    "scripts": [
+      "print.js"
+    ],
+    "assets": [
+      "node_modules/usb/**/*",
+      "node_modules/**/build/Release/*.node",
+      "node_modules/sharp/vendor/**/*",
+      "node_modules/@img/**/*",
+      "images/**/*"
+    ]
   },
   "keywords": [],
-  "author": "",
+  "author": "duminda",
   "license": "ISC",
   "dependencies": {
+    "@img/sharp-libvips-win32-x64": "^1.2.4",
+    "@img/sharp-win32-x64": "^0.34.5",
     "@types/ws": "^8.18.0",
     "escpos": "3.0.0-alpha.6",
     "escpos-usb": "3.0.0-alpha.4",
-    "express": "^4.21.2",
-    "node-printer": "^1.0.4",
-    "node-thermal-printer": "^4.4.4",
-    "pkg": "^5.8.1",
+    "sharp": "^0.32.6",
     "usb": "1.9.2",
-    "sharp": "^0.34.1",
-    "node-windows": "1.0.0-beta.8",
     "ws": "^8.18.1"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.14.1"
   }
 }

@@ -16,26 +16,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8
+
+      - name: Get pnpm store directory
+        shell: pwsh
+        run: |
+          echo "STORE_PATH=$(pnpm store path)" >> $env:GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: Build portable distribution
-        run: npm run dist
+      - name: Build standalone exe + installer
+        run: pnpm release
 
-      - name: Package release ZIP
+      - name: Determine package name
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
           $zipName = "pos-printer-server-v$version.zip"
-          Compress-Archive -Path dist\* -DestinationPath $zipName -Force
-          echo "PACKAGE_NAME=$zipName" >> $env:GITHUB_ENV
-          echo "PACKAGE_PATH=$zipName" >> $env:GITHUB_ENV
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_NAME=$zipName"
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_PATH=dist/$zipName"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
