@@ -1,9 +1,72 @@
 const WebSocket = require("ws");
 const escpos = require("escpos");
 const sharp = require('sharp');
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
 escpos.USB = require("escpos-usb");
 
+// ── Version metadata (read from version.json) ──
+let APP_VERSION = "1.0.0";
+let BUILD_DATE = "unknown";
+try {
+  const versionPath = path.join(__dirname, "version.json");
+  if (fs.existsSync(versionPath)) {
+    const v = JSON.parse(fs.readFileSync(versionPath, "utf8"));
+    APP_VERSION = v.version || APP_VERSION;
+    BUILD_DATE = v.buildDate || BUILD_DATE;
+  }
+} catch (e) {
+  // ignore
+}
 
+// ── HTTP server for health/version checks ──
+const httpServer = http.createServer((req, res) => {
+  // CORS (allow admin panel from any origin)
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.url === "/version" || req.url === "/api/version") {
+    const data = JSON.stringify({
+      version: APP_VERSION,
+      buildDate: BUILD_DATE,
+      name: "POS Printer Server",
+      platform: process.platform,
+      arch: process.arch,
+      nodeVersion: process.version,
+      uptime: process.uptime(),
+    });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(data);
+    return;
+  }
+
+  if (req.url === "/health" || req.url === "/api/health") {
+    const data = JSON.stringify({
+      status: "ok",
+      uptime: process.uptime(),
+    });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(data);
+    return;
+  }
+
+  res.writeHead(200);
+  res.end("POS Printer Server — WebSocket on ws://localhost:8080");
+});
+
+httpServer.listen(8081, "127.0.0.1", () => {
+  console.log("📡 HTTP health server on http://127.0.0.1:8081");
+});
+
+// ── WebSocket server for print jobs ──
 const wss = new WebSocket.Server({ port: 8080 });
 
 let printQueue = []; // Queue to store failed print jobs

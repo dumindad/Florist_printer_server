@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "buildDate": "2026-05-25",
+  "name": "POS Printer Server",
+  "releaseNotes": "Initial release — basic receipt and label printing via WebSocket."
+}

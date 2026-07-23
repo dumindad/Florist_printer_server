@@ -22,7 +22,7 @@ console.log('Creating portable distribution...');
 if (!fs.existsSync(DIST)) fs.mkdirSync(DIST, { recursive: true });
 
 // 1. Copy source files
-const srcFiles = ['print.js', 'labelPrint.js', 'POSprinter.js', 'package.json'];
+const srcFiles = ['print.js', 'labelPrint.js', 'POSprinter.js', 'package.json', 'version.json'];
 const srcDirs = ['images'];
 
 for (const f of srcFiles) {

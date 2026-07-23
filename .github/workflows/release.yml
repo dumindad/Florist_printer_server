@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build portable distribution
+        run: npm run dist
+
+      - name: Package release ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $zipName = "pos-printer-server-v$version.zip"
+          Compress-Archive -Path dist\* -DestinationPath $zipName -Force
+          echo "PACKAGE_NAME=$zipName" >> $env:GITHUB_ENV
+          echo "PACKAGE_PATH=$zipName" >> $env:GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: POS Printer Server ${{ github.ref_name }}
+          body_path: version.json
+          files: ${{ env.PACKAGE_PATH }}
+          generate_release_notes: true
