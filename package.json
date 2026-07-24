@@ -11,6 +11,9 @@
     "release": "pnpm build && pnpm package",
     "gen-certs": "node scripts/gen-certs.js"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["sharp", "@img/sharp-win32-x64", "@img/sharp-libvips-win32-x64", "esbuild", "usb", "escpos-usb"]
+  },
   "pkg": {
     "scripts": [
       "print.js"
