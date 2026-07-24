@@ -24,7 +24,7 @@ set "VERSION_FILE=%TARGET_DIR%\version.json"
 echo [1/6] Creating target directory...
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 if not exist "%TARGET_DIR%\logs" mkdir "%TARGET_DIR%\logs"
-if not exist "%TARGET_DIR%\native_modules" mkdir "%TARGET_DIR%\native_modules"
+if not exist "%TARGET_DIR%\node_modules" mkdir "%TARGET_DIR%\node_modules"
 
 echo [2/6] Installing nssm...
 if exist "%SCRIPT_DIR%nssm.exe" (
@@ -39,8 +39,8 @@ copy /Y "%SCRIPT_DIR%printer-server.exe" "%TARGET_DIR%\printer-server.exe" >nul
 echo   printer-server.exe
 
 echo [4/6] Copying native modules...
-if exist "%SCRIPT_DIR%native_modules\" (
-    xcopy /E /I /Y "%SCRIPT_DIR%native_modules\*" "%TARGET_DIR%\native_modules\" >nul
+if exist "%SCRIPT_DIR%node_modules\" (
+    xcopy /E /I /Y "%SCRIPT_DIR%node_modules\*" "%TARGET_DIR%\node_modules\" >nul
     echo   Native modules copied
 )
 
@@ -72,7 +72,7 @@ nssm set POSPrinterServer AppStdout "%TARGET_DIR%\logs\stdout.log"
 nssm set POSPrinterServer AppStderr "%TARGET_DIR%\logs\stderr.log"
 
 :: Set NODE_PATH so native modules can be found
-nssm set POSPrinterServer AppEnvironmentExtra NODE_PATH=%TARGET_DIR%\native_modules
+nssm set POSPrinterServer AppEnvironmentExtra NODE_PATH=%TARGET_DIR%\node_modules
 
 echo   Service installed
 
