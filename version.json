@@ -1,6 +1,6 @@
 {
-  "version": "1.0.0",
-  "buildDate": "2026-05-25",
+  "version": "1.0.1",
+  "buildDate": "2026-07-26",
   "name": "POS Printer Server",
-  "releaseNotes": "Initial release — basic receipt and label printing via WebSocket."
+  "releaseNotes": "Fix: postbuild step now bundles production node_modules alongside the exe, resolving native module (sharp/usb) load errors at startup."
 }
