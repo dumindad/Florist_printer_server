@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node print.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "pnpm exec pkg print.js --targets node20-win-x64 --output dist/printer-server.exe",
+    "build": "pnpm exec pkg print.js --targets node20-win-x64 --output dist/printer-server.exe && node scripts/postbuild.js",
     "package": "powershell -ExecutionPolicy Bypass -File build-installer.ps1",
     "release": "pnpm build && pnpm package",
     "gen-certs": "node scripts/gen-certs.js"
