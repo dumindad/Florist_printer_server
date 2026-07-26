@@ -21,12 +21,12 @@ set "TARGET_DIR=C:\POSPrinterServer"
 set "SCRIPT_DIR=%~dp0"
 set "VERSION_FILE=%TARGET_DIR%\version.json"
 
-echo [1/6] Creating target directory...
+echo [1/8] Creating target directory...
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 if not exist "%TARGET_DIR%\logs" mkdir "%TARGET_DIR%\logs"
 if not exist "%TARGET_DIR%\node_modules" mkdir "%TARGET_DIR%\node_modules"
 
-echo [2/6] Installing nssm...
+echo [2/8] Installing nssm...
 if exist "%SCRIPT_DIR%nssm.exe" (
     copy /Y "%SCRIPT_DIR%nssm.exe" "%TARGET_DIR%\nssm.exe" >nul
     echo   nssm.exe copied
@@ -34,11 +34,11 @@ if exist "%SCRIPT_DIR%nssm.exe" (
     echo   WARNING: nssm.exe not found in package
 )
 
-echo [3/6] Copying printer server...
+echo [3/8] Copying printer server...
 copy /Y "%SCRIPT_DIR%printer-server.exe" "%TARGET_DIR%\printer-server.exe" >nul
 echo   printer-server.exe
 
-echo [4/6] Copying native modules...
+echo [4/8] Copying native modules...
 if exist "%SCRIPT_DIR%node_modules\" (
     xcopy /E /I /Y "%SCRIPT_DIR%node_modules\*" "%TARGET_DIR%\node_modules\" >nul
     echo   Native modules copied
@@ -50,7 +50,25 @@ if exist "%SCRIPT_DIR%update-service.bat" (
     echo   update-service.bat copied
 )
 
-echo [5/6] Installing Windows Service...
+echo [5/8] Copying SSL certificates...
+if not exist "%TARGET_DIR%\certs" mkdir "%TARGET_DIR%\certs"
+if exist "%SCRIPT_DIR%certs\*.pem" (
+    copy /Y "%SCRIPT_DIR%certs\*.pem" "%TARGET_DIR%\certs\" >nul
+    echo   SSL certificates copied
+) else (
+    echo   WARNING: No certs found in %SCRIPT_DIR%certs\
+)
+
+:: Add self-signed cert to Windows Trusted Root store so browsers trust WSS
+echo [6/8] Adding certificate to Trusted Root store...
+certutil -addstore -user "Root" "%TARGET_DIR%\certs\localhost+2.pem" >nul 2>&1
+if %errorlevel% equ 0 (
+    echo   Certificate trusted
+) else (
+    echo   Note: Certificate trust may already be configured or skipped (continuing)
+)
+
+echo [7/8] Installing Windows Service...
 cd /d "%TARGET_DIR%"
 
 :: Stop existing service if it exists
@@ -76,7 +94,7 @@ nssm set POSPrinterServer AppEnvironmentExtra NODE_PATH=%TARGET_DIR%\node_module
 
 echo   Service installed
 
-echo [6/6] Starting Service...
+echo [8/8] Starting Service...
 nssm start POSPrinterServer
 if %errorlevel% equ 0 (
     echo   Service started successfully

@@ -1,6 +1,6 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.0",
   "buildDate": "2026-07-26",
   "name": "POS Printer Server",
-  "releaseNotes": "Fix: postbuild step now bundles production node_modules alongside the exe, resolving native module (sharp/usb) load errors at startup."
+  "releaseNotes": "v1.0.0 initial release — WSS certificate fix: self-signed certs now trusted during setup.bat via certutil, SAN entries included for Chrome compatibility."
 }
