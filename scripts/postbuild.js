@@ -41,7 +41,7 @@ const npmArgs = [
   "--no-package-lock",
   "--no-audit",
   "--no-fund",
-  "--prefer-offline",
+  "--prefer-online",
   "--loglevel=error",
 ].join(" ");
 execSync(`npm ${npmArgs}`, { cwd: DIST, stdio: "inherit" });
