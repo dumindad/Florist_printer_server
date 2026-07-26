@@ -1,8 +1,20 @@
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [string]$BuildDate = (Get-Date -Format "yyyy-MM-dd"),
     [string]$AppName = "POS Printer Server"
 )
+
+# Auto-detect version from package.json if not specified
+if ([string]::IsNullOrEmpty($Version)) {
+    $pj = Join-Path $PSScriptRoot "package.json"
+    if (Test-Path $pj) {
+        try {
+            $pkg = Get-Content $pj -Raw | ConvertFrom-Json
+            if ($pkg.version) { $Version = $pkg.version }
+        } catch { }
+    }
+    if ([string]::IsNullOrEmpty($Version)) { $Version = "1.0.0" }
+}
 
 $ErrorActionPreference = "Continue"  # we check for failures explicitly after each step
 $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
