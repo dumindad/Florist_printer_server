@@ -117,6 +117,10 @@ let labelPrintQueue = [];
 let isPrinting = false;
 let isLabelPrinting = false;
 
+// ── Printer mode tracking (hybrid: USB detection + remembered-mode fallback) ──
+let lastKnownMode = null;        // "ESC" | "TSPL" — last mode the user confirmed
+let pendingModeChange = null;    // { ws, neededMode, printJob } — paused waiting for MODE_READY
+
 wss.on("connection", (ws) => {
   console.log("Client connected");
   console.log("printQueue", printQueue);
@@ -132,7 +136,16 @@ wss.on("connection", (ws) => {
       } else if (data.type === "PRINT_PACKAGE_PRODUCTS") {
         queuePrintJobToMakeB(data, ws);
       } else if (data.type === "PRINT_LABEL_CODE") {
-        printLabel(data, ws);
+        queuePrintLabelJob(data, ws);
+      } else if (data.type === "MODE_READY") {
+        handleModeReady(ws);
+      } else if (data.type === "MODE_SET") {
+        // User tells us the current mode of the printer (for remembered-mode fallback)
+        if (data.mode === 'ESC' || data.mode === 'TSPL') {
+          lastKnownMode = data.mode;
+          console.log(`👤 User set printer mode to: ${lastKnownMode}`);
+          ws.send(JSON.stringify({ type: "MODE_SET_CONFIRMED", mode: lastKnownMode }));
+        }
       }
     } catch (err) {
       console.error("Error:", err);
@@ -162,13 +175,40 @@ function queuePrintJobToMakeB(printJob, ws) {
     processLabelPrintQueue(); // Process the queue
 }
 
+// Function to queue label-code print jobs (TSPL mode)
+function queuePrintLabelJob(printJob, ws) {
+    // Use a single queue approach: processLabelPrintQueue already handles ESC/POS jobs
+    // For TSPL label jobs, we handle them directly with mode check
+    console.log("queuePrintLabelJob----", printJob)
+    ensurePrinterMode('TSPL', ws).then((modeOK) => {
+        if (!modeOK) {
+            // Queue is paused — store job for later
+            pendingModeChange = { ws, neededMode: 'TSPL', printJob };
+            return;
+        }
+        printLabel(printJob, ws);
+    });
+}
+
 // Function to process the print queue
-function processPrintQueue() {
+async function processPrintQueue() {
     if (isPrinting || printQueue.length === 0) return;
+    // Don't start a new job if waiting for mode change confirmation
+    if (pendingModeChange) return;
 
     isPrinting = true;
     const { printJob, ws } = printQueue.shift(); // Get the next job
     console.log("processPrintQueue", printJob)
+
+    // Check printer mode before printing
+    const modeOK = await ensurePrinterMode('ESC', ws);
+    if (!modeOK) {
+      // Queue is paused waiting for MODE_READY — put job back and release
+      printQueue.unshift({ printJob, ws });
+      isPrinting = false;
+      return;
+    }
+
     printReceipt(printJob)
         .then(() => {
             ws.send(JSON.stringify({ success: true }));
@@ -187,12 +227,24 @@ function processPrintQueue() {
 }
 
 // Process label print queue
-function processLabelPrintQueue() {
+async function processLabelPrintQueue() {
     if (isLabelPrinting || labelPrintQueue.length === 0) return;
+    // Don't start a new job if waiting for mode change confirmation
+    if (pendingModeChange) return;
 
     isLabelPrinting = true;
     const { printJob, ws } = labelPrintQueue.shift();
     console.log("lable how to", printJob)
+
+    // Package products print in ESC/POS mode (uses escpos library)
+    const modeOK = await ensurePrinterMode('ESC', ws);
+    if (!modeOK) {
+      // Queue is paused — put job back and release
+      labelPrintQueue.unshift({ printJob, ws });
+      isLabelPrinting = false;
+      return;
+    }
+
     printPackageLabel(printJob)
         .then(() => {
             ws.send(JSON.stringify({ success: true }));
@@ -210,10 +262,10 @@ function processLabelPrintQueue() {
 
 // Function to print package product labels
 async function printPackageLabel(data, ws) {
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
         try {
-            // const idVendorFormatted = String(data.idVendor).padStart(4, '0');
-            // console.log("idVendor", idVendorFormatted)
+            // Note: Printer must be in ESC/POS mode for package labels (checked before queue processing)
+
             const idVendor = parseInt(data.idVendor, 16); // Convert hex string to integer
             const idProduct = parseInt(data.idProduct, 16);
             const device = new escpos.USB(idVendor, idProduct);
@@ -274,6 +326,8 @@ async function printPackageLabel(data, ws) {
 async function printReceipt(data, ws) {
     return new Promise(async (resolve, reject) => {
         try {
+            // Note: Printer must be in ESC/POS mode for receipts (checked before queue processing)
+
             const device = new escpos.USB(data.idVendor, data.idProduct);
             const printer = new escpos.Printer(device);
             const { invoiceNo, create, items, paymentMethod } = data;
@@ -435,46 +489,161 @@ async function sendRawCommand(device, command) {
     });
 }
 
-async function setPrinterMode(targetMode) {
-    const device = usb.findByIds(VENDOR_ID, PRODUCT_ID);
+// ── Hybrid printer mode detection ──
+// Tries USB detection first; returns 'ESC', 'TSPL', or null if detection fails.
+async function queryPrinterMode() {
+  const device = usb.findByIds(VENDOR_ID, PRODUCT_ID);
+  if (!device) return null;
+
+  try {
+    device.open();
+    const iface = device.interfaces[0];
+    if (!iface) { device.close(); return null; }
 
     try {
-        // 1. Open with timeout
-        await new Promise((resolve, reject) => {
-            device.open(err => err ? reject(err) : resolve());
-            setTimeout(() => reject(new Error('Open timeout (5s)')), 5000);
-        });
+      if (os.platform() !== "win32" && iface.isKernelDriverActive()) {
+        iface.detachKernelDriver();
+      }
+    } catch (_) {}
 
-        // 2. Basic check
-        if (!device.interfaces?.[0]?.descriptors) {
-            throw new Error('Invalid interface structure');
+    iface.claim();
+
+    // ── Approach A: Read from USB IN endpoint ──
+    // Many thermal printers report status (incl. emulation mode) via interrupt IN endpoint
+    const inEndpoint = iface.endpoints.find(ep => ep.direction === 'in');
+    if (inEndpoint) {
+      try {
+        const statusBuf = await new Promise((resolve, reject) => {
+          inEndpoint.transfer(8, (err, data) => {
+            if (err) return reject(err);
+            resolve(data);
+          });
+        });
+        // Log raw status bytes for debugging
+        console.log("📟 USB status bytes:", Array.from(statusBuf).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+        // Some Xprinter models encode mode in status byte [0]:
+        //   0x00 = ESC/POS (receipt), 0x01 = TSPL (label)
+        // This is highly model-specific — adapt as needed for your printer
+        const detected = statusBuf[0];
+        if (detected === 0x01 || detected === 0x02) {
+          iface.release(true, () => device.close());
+          console.log(`🔍 USB detected printer mode: TSPL (status=0x${detected.toString(16)})`);
+          return 'TSPL';
+        } else if (detected === 0x00) {
+          iface.release(true, () => device.close());
+          console.log(`🔍 USB detected printer mode: ESC (status=0x${detected.toString(16)})`);
+          return 'ESC';
         }
-
-        // 3. Control transfer verification
-        await new Promise((resolve, reject) => {
-            device.controlTransfer(
-                0x40, 0x00, 0x0000, 0x0000, Buffer.alloc(0),
-                err => err ? reject(err) : resolve()
-            );
-        });
-
-        //TODO Rest of mode switching code...
-        const command = targetMode === 'TSPL'
-            ? Buffer.from('SET MODE TSPL\r\nWRITE\r\n', 'ascii')
-            : Buffer.from('SET MODE ESC\r\nWRITE\r\n', 'ascii');
-
-        return new Promise((resolve, reject) => {
-            outEndpoint.transfer(command, err => {
-                iface.release(true, () => { });
-                device.close();
-                if (err) return reject(new Error(`Transfer failed: ${err.message}`));
-                resolve(true);
-            });
-        });
-
-    } finally {
-        device.close();
+      } catch (e) {
+        console.log("ℹ️ IN endpoint read not supported:", e.message);
+      }
     }
+
+    // ── Approach B: Try vendor-specific control transfer ──
+    try {
+      const ctrlBuf = Buffer.alloc(8);
+      await new Promise((resolve, reject) => {
+        // bmRequestType=0xC0 (vendor IN), bRequest=0x01, wValue=0, wIndex=0
+        device.controlTransfer(0xC0, 0x01, 0x0000, 0x0000, ctrlBuf, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      console.log("📟 Control transfer response:", Array.from(ctrlBuf).map(b => b.toString(16)).join(' '));
+      // If we got a meaningful response, interpret it here
+    } catch (e) {
+      console.log("ℹ️ Control transfer not supported:", e.message);
+    }
+
+    iface.release(true, () => device.close());
+  } catch (e) {
+    try { device.close(); } catch (_) {}
+  }
+
+  // Detection not supported by this printer model
+  return null;
+}
+
+/**
+ * Ensure printer is in the needed mode before printing.
+ * Tries USB detection; falls back to last-known mode.
+ * Returns true if mode is confirmed, false if user intervention needed.
+ */
+async function ensurePrinterMode(neededMode, ws) {
+  // Step 1: Try USB detection
+  try {
+    const detected = await queryPrinterMode();
+    if (detected === neededMode) {
+      lastKnownMode = detected;
+      console.log(`✅ Printer confirmed in ${detected} mode via USB detection`);
+      return true; // No dialog needed
+    }
+    if (detected !== null) {
+      // Detected a mode, but it's the wrong one — need user to switch
+      console.log(`⚠️ Printer is in ${detected} mode, need ${neededMode}`);
+      lastKnownMode = detected;
+    }
+  } catch (e) {
+    console.log("ℹ️ USB mode detection failed:", e.message);
+  }
+
+  // Step 2: Fallback — check last-known mode
+  if (lastKnownMode === neededMode) {
+    console.log(`✅ Printer last known mode: ${lastKnownMode} — matches needed ${neededMode}`);
+    return true;
+  }
+
+  // Step 3: Ask user to switch mode
+  console.log(`🔄 Requesting mode change to ${neededMode} (last known: ${lastKnownMode})`);
+  const neededModeLabel = neededMode === 'TSPL' ? 'label' : 'receipt';
+  if (ws && ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify({
+      type: "MODE_CHANGE_REQUIRED",
+      neededMode: neededMode,
+      paperRoll: neededModeLabel,
+      message: `Set the printer to ${neededModeLabel.toUpperCase()} mode.`
+    }));
+  }
+
+  // Pause queue — wait for MODE_READY
+  pendingModeChange = { ws, neededMode };
+  return false;
+}
+
+/** Resume queue after user confirms manual mode switch */
+function handleModeReady(ws) {
+  if (!pendingModeChange) {
+    console.log("⚠️ Received MODE_READY but no pending mode change");
+    return;
+  }
+  // Only accept MODE_READY from the same client that triggered the change
+  if (pendingModeChange.ws !== ws) {
+    console.log("⚠️ MODE_READY from different client — ignoring");
+    return;
+  }
+
+  const mode = pendingModeChange.neededMode;
+  const savedJob = pendingModeChange.printJob; // May hold a TSPL label job
+  console.log(`✅ User confirmed mode switch to ${mode}`);
+  lastKnownMode = mode;
+  pendingModeChange = null;
+
+  // If there's a saved label job, run it directly
+  if (savedJob) {
+    printLabel(savedJob, ws);
+    return;
+  }
+
+  // Otherwise resume the paused queue
+  processPrintQueue();
+  processLabelPrintQueue();
+}
+
+async function setPrinterMode(targetMode) {
+    console.log(`⏭️ setPrinterMode(${targetMode}) called — manual hardware procedure is required for this printer model.`);
+    console.log(`   The mode switch is now handled via the MODE_CHANGE_REQUIRED → MODE_READY frontend flow.`);
+    return true;
 }
 
 
@@ -559,6 +728,9 @@ async function printLabel(printData, ws) {
         if (ws) ws.send(JSON.stringify({ success: false, error: "Printer not found" }));
         return;
     }
+
+    // Note: Printer must be in TSPL mode for labels (checked before queue processing)
+
     // Label dimensions
     const labelWidthMM = 30;
     const labelHeightMM = 20;
@@ -609,3 +781,5 @@ PRINT ${printData.quantity},1\r
 
 
 }
+
+// HandleFeedAndConfirm removed — manual mode-switch procedure supersedes the old software feed command.
